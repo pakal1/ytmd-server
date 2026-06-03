@@ -68,7 +68,9 @@ io.on('connection', (socket) => {
   console.log(`[Server] Connected: ${socket.id}`);
 
   // ── CREATE ROOM ──────────────────────────────────────────
-  socket.on('create-room', (cb) => {
+  socket.on('create-room', (displayName, cb) => {
+    // Support old signature create-room(cb) and new create-room(displayName, cb)
+    if (typeof displayName === 'function') { cb = displayName; displayName = 'Host'; }
     if (typeof cb !== 'function') return;
 
     // Limit total rooms
@@ -98,6 +100,7 @@ io.on('connection', (socket) => {
     socket.join(code);
     socket.data.roomCode = code;
     socket.data.isHost = true;
+    socket.data.displayName = typeof displayName === 'string' ? displayName.slice(0, 30) : 'Host';
 
     console.log(`[Server] Room created: ${code} by ${socket.id}`);
     cb({ code });
@@ -166,7 +169,9 @@ io.on('connection', (socket) => {
     if (typeof text !== 'string' || text.trim().length === 0 || text.length > 200) return;
 
     room.lastActivity = Date.now();
-    io.to(code).emit('chat-message', {
+    // Use socket.to() NOT io.to() — this excludes the sender.
+    // The sender already shows the message locally via appendChatMessage().
+    socket.to(code).emit('chat-message', {
       from: socket.data.displayName || (socket.data.isHost ? 'Host' : 'Oyente'),
       text: text.trim().slice(0, 200),
       ts: Date.now()

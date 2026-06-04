@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3001;
 const MAX_ROOMS = 50;
 const MAX_ROOM_MEMBERS = 10;
 const ROOM_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
-const RATE_LIMIT_MS = 500; // min ms between state-updates per socket
+const RATE_LIMIT_MS = 200; // min ms between state-updates per socket (matched to 500ms client interval)
 
 // ─── Rate limiter map: socketId → last event timestamp ────
 const rateLimits = new Map();

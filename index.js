@@ -80,8 +80,25 @@ setInterval(() => {
   }
 }, 30 * 60 * 1000);
 
+// ─── Logger Intercept for Remote Debugging ─────────────────────────────────────
+const serverLogs = [];
+const originalLog = console.log;
+const originalError = console.error;
+function interceptLog(level, args) {
+  const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  serverLogs.push(`[${new Date().toISOString()}] [${level}] ${msg}`);
+  if (serverLogs.length > 100) serverLogs.shift();
+}
+console.log = function(...args) { interceptLog('INFO', args); originalLog.apply(console, args); };
+console.error = function(...args) { interceptLog('ERROR', args); originalError.apply(console, args); };
+
+app.get('/logs', (_req, res) => {
+  res.send(`<pre style="background:#0f0f0f;color:#22c55e;padding:10px;">${serverLogs.join('\n')}</pre>`);
+});
+
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), botOnline: !!discordClient?.isReady() });
+  const { generateDependencyReport } = require('@discordjs/voice');
+  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), botOnline: !!discordClient?.isReady(), deps: generateDependencyReport() });
 });
 
 const io = new Server(httpServer, {

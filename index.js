@@ -60,6 +60,20 @@ const RATE_LIMIT_MS    = 200;
 const rateLimits = new Map();
 const rooms      = new Map(); // ListenTogether Rooms
 
+// Auto-actualizar yt-dlp al iniciar para garantizar compatibilidad con YouTube
+(async () => {
+  try {
+    const { execFile } = require('child_process');
+    const ytdlpBin = require.resolve('youtube-dl-exec/bin/yt-dlp');
+    await new Promise((resolve) => execFile(ytdlpBin, ['--update'], (err, stdout) => {
+      if (stdout) console.log('[yt-dlp update]', stdout.trim());
+      resolve();
+    }));
+  } catch (e) {
+    console.error('[yt-dlp update] No se pudo actualizar:', e.message);
+  }
+})();
+
 function generateRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -166,7 +180,9 @@ async function playNext() {
       output: '-',
       quiet: true,
       noWarnings: true,
-      format: 'bestaudio/best'
+      extractAudio: true,
+      audioFormat: 'opus',
+      audioQuality: 0
     };
     if (cookiesFilePath) {
       args.cookies = cookiesFilePath;
@@ -258,12 +274,11 @@ async function searchAndAdd(query, user) {
       targetUrl = `https://music.youtube.com/watch?v=${search[0].videoId}`;
     }
 
-    // Obtener metadata con yt-dlp --dump-json (bypasa todo bloqueo)
+    // Obtener metadata con yt-dlp --dump-json (sin --format para evitar errores)
     const ytArgs = {
       dumpJson: true,
       noWarnings: true,
-      noPlaylist: true,
-      format: 'bestaudio/best'
+      noPlaylist: true
     };
     if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
     

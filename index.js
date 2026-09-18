@@ -111,6 +111,7 @@ let queue = [];
 let currentSong = null;
 let isPlaying = false;
 let voiceConnection = null;
+let globalYTUserCookie = null;
 const audioPlayer = createAudioPlayer();
 
 // Broadcast bot state to all connected dashboard apps
@@ -142,12 +143,22 @@ async function playNext() {
     console.log(`[Bot Voice] Buscando stream para: ${currentSong.url}`);
     
     const yt = require('youtube-dl-exec');
-    const dlProcess = yt.exec(currentSong.url, {
+    const args = {
       output: '-',
       quiet: true,
-      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best',
-      limitRate: '100K'
-    }, { stdio: ['ignore', 'pipe', 'ignore'] });
+      noWarnings: true,
+      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
+    };
+    if (globalYTUserCookie) {
+      args.addHeader = `Cookie: ${globalYTUserCookie}`;
+    }
+
+    const dlProcess = yt.exec(currentSong.url, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    
+    // Evitar que un error en yt-dlp (como IP bloqueada) crashee todo el server
+    dlProcess.catch(err => {
+      console.error('[Bot Voice] Error en yt-dlp:', err.message);
+    });
 
     const resource = createAudioResource(dlProcess.stdout);
     audioPlayer.play(resource);
@@ -368,10 +379,10 @@ io.on('connection', (socket) => {
   // Comandos de voz que llegan desde el dashboard de la app local
   socket.on('bot-sync-cookies', (cookieStr) => {
     try {
-      play.setToken({ youtube: { cookie: cookieStr } });
-      console.log(`[Bot] Cookies sincronizadas desde la app local para ${socket.id}`);
+      globalYTUserCookie = cookieStr;
+      console.log(`[Bot] Cookies guardadas globalmente para streams (socket: ${socket.id})`);
     } catch (e) {
-      console.error('[Bot] Error seteando cookies:', e);
+      console.error('[Bot] Error guardando cookies:', e);
     }
   });
 

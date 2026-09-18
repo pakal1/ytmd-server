@@ -6,16 +6,20 @@ const {
   Client, GatewayIntentBits, REST, Routes,
   SlashCommandBuilder, EmbedBuilder, ActivityType
 } = require('discord.js');
+const {
+  joinVoiceChannel, createAudioPlayer, createAudioResource,
+  AudioPlayerStatus, VoiceConnectionStatus, getVoiceConnection
+} = require('@discordjs/voice');
+const play = require('play-dl');
 
 // ─── Supabase config ──────────────────────────────────────────────────────────
 const SUPABASE_URL = 'ylreexdonwpsyaqzdqah.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_XEWgsWQMZVAVZ4BOBvLPGQ_4SlLuT-U';
 
-// ─── Discord config (valores desde env vars de Render — nunca hardcodeados) ───
+// ─── Discord config ───────────────────────────────────────────────────────────
 const DISCORD_TOKEN     = process.env.DISCORD_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1550408318374252636';
 const DISCORD_GUILD_ID  = process.env.DISCORD_GUILD_ID  || '1534579090433245235';
-const BOT_SECRET        = process.env.BOT_SECRET        || 'ytmd-private-2024';
 
 // ─── Supabase tier check ──────────────────────────────────────────────────────
 function fetchUserTier(userId) {
@@ -47,14 +51,14 @@ const httpServer = createServer(app);
 const PORT             = process.env.PORT || 3001;
 const MAX_ROOMS        = 50;
 const MAX_ROOM_MEMBERS = 10;
-const ROOM_TTL_MS      = 4 * 60 * 60 * 1000; // 4 hours
+const ROOM_TTL_MS      = 4 * 60 * 60 * 1000;
 const RATE_LIMIT_MS    = 200;
 
 const rateLimits = new Map();
-const rooms      = new Map();
+const rooms      = new Map(); // ListenTogether Rooms
 
 function generateRoomCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // sin O,0,1,I
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 8; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
@@ -63,32 +67,21 @@ function generateRoomCode() {
 function isValidState(state) {
   if (!state || typeof state !== 'object') return false;
   if (typeof state.videoId !== 'string' || state.videoId.length > 20) return false;
-  if (typeof state.currentTime !== 'number' || state.currentTime < 0 || state.currentTime > 86400) return false;
+  if (typeof state.currentTime !== 'number') return false;
   if (typeof state.paused !== 'boolean') return false;
-  if (state.title && typeof state.title !== 'string') return false;
-  if (state.title && state.title.length > 200) return false;
   return true;
 }
 
-// Limpiar salas expiradas cada 30 minutos
+// Limpiar salas expiradas
 setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms.entries()) {
-    if (now - room.lastActivity > ROOM_TTL_MS) {
-      console.log(`[Server] Cleaning up expired room ${code}`);
-      rooms.delete(code);
-    }
+    if (now - room.lastActivity > ROOM_TTL_MS) rooms.delete(code);
   }
 }, 30 * 60 * 1000);
 
 app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
-    rooms: rooms.size,
-    uptime: process.uptime(),
-    botOnline: !!discordClient?.isReady(),
-    appConnected: !!controllerSocket?.connected
-  });
+  res.json({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), botOnline: !!discordClient?.isReady() });
 });
 
 const io = new Server(httpServer, {
@@ -96,86 +89,154 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 2 * 1024
 });
 
-// ─── Discord Bot ──────────────────────────────────────────────────────────────
-let controllerSocket = null; // socket del plugin DiscordBot.js en la app Electron
-let discordClient    = null;
-const pendingCmds    = new Map(); // commandId → interaction pendiente
+// ─── Discord Voice Player State ───────────────────────────────────────────────
+let queue = [];
+let currentSong = null;
+let isPlaying = false;
+let voiceConnection = null;
+const audioPlayer = createAudioPlayer();
 
-function formatTime(s) {
-  if (!s || isNaN(s)) return '0:00';
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${sec.toString().padStart(2, '0')}`;
+// Broadcast bot state to all connected dashboard apps
+function broadcastBotState() {
+  io.emit('bot-state-update', {
+    isPlaying,
+    currentSong,
+    queue: queue.map(s => ({ title: s.title, duration: s.duration, thumbnail: s.thumbnail }))
+  });
 }
 
-function buildProgressBar(current, total) {
-  if (!total || isNaN(total)) return '▬▬▬▬▬▬▬▬▬▬';
-  const pct    = Math.max(0, Math.min(1, current / total));
-  const filled = Math.round(pct * 10);
-  return '█'.repeat(filled) + '▬'.repeat(10 - filled);
+audioPlayer.on(AudioPlayerStatus.Idle, () => {
+  playNext();
+});
+
+async function playNext() {
+  if (queue.length === 0) {
+    isPlaying = false;
+    currentSong = null;
+    broadcastBotState();
+    return;
+  }
+  
+  currentSong = queue.shift();
+  isPlaying = true;
+  broadcastBotState();
+
+  try {
+    const stream = await play.stream(currentSong.url);
+    const resource = createAudioResource(stream.stream, { inputType: stream.type });
+    audioPlayer.play(resource);
+  } catch (err) {
+    console.error('[Bot Voice] Error al reproducir:', err.message);
+    playNext(); // Saltar a la siguiente si hay error
+  }
 }
 
-function buildNowPlayingEmbed(data) {
-  const bar = buildProgressBar(data.currentTime, data.duration);
-  return new EmbedBuilder()
-    .setColor(0xFF0000)
-    .setTitle(data.paused ? '⏸ Pausado' : '🎵 Reproduciendo ahora')
-    .setDescription(`**${data.title || 'Sin título'}**\n${data.artist || ''}`)
-    .setThumbnail(data.thumbnail || null)
-    .addFields({ name: 'Progreso', value: `${bar}\n\`${formatTime(data.currentTime)} / ${formatTime(data.duration)}\`` })
-    .setFooter({ text: 'YTMD Bot' });
+async function ensureVoiceConnection(memberVoiceChannel) {
+  if (voiceConnection && voiceConnection.state.status !== VoiceConnectionStatus.Destroyed) return true;
+  
+  let targetChannel = memberVoiceChannel;
+
+  // Si no se proveyó canal, intentar encontrar uno ocupado en el server
+  if (!targetChannel) {
+    const guild = discordClient.guilds.cache.get(DISCORD_GUILD_ID);
+    if (!guild) return false;
+    for (const [_, channel] of guild.channels.cache) {
+       if (channel.isVoiceBased() && channel.members.size > 0) {
+          targetChannel = channel;
+          break;
+       }
+    }
+  }
+  
+  if (!targetChannel) return false;
+  
+  try {
+    voiceConnection = joinVoiceChannel({
+        channelId: targetChannel.id,
+        guildId: targetChannel.guild.id,
+        adapterCreator: targetChannel.guild.voiceAdapterCreator
+    });
+    voiceConnection.subscribe(audioPlayer);
+    
+    voiceConnection.on(VoiceConnectionStatus.Disconnected, () => {
+      voiceConnection.destroy();
+      voiceConnection = null;
+      isPlaying = false;
+      currentSong = null;
+      queue = [];
+      broadcastBotState();
+    });
+    return true;
+  } catch (err) {
+    console.error('[Bot Voice] Error uniendo canal de voz:', err);
+    return false;
+  }
 }
+
+async function searchAndAdd(query, user) {
+  try {
+    let video;
+    if (query.startsWith('http')) {
+       const info = await play.video_info(query);
+       video = info.video_details;
+    } else {
+       const search = await play.search(query, { limit: 1 });
+       if (!search.length) return { error: 'No se encontraron resultados en YouTube.' };
+       video = search[0];
+    }
+    
+    const song = {
+      title: video.title,
+      url: video.url,
+      thumbnail: video.thumbnails?.[0]?.url,
+      duration: video.durationInSec,
+      user
+    };
+    
+    queue.push(song);
+    if (!isPlaying) {
+      await playNext();
+    } else {
+      broadcastBotState(); // Update queue
+    }
+    
+    return { song };
+  } catch (err) {
+    return { error: 'Error interno buscando la canción.' };
+  }
+}
+
+// ─── Discord Client ───────────────────────────────────────────────────────────
+let discordClient = null;
 
 const slashCommands = [
-  new SlashCommandBuilder().setName('now-playing').setDescription('Muestra la canción que está sonando'),
+  new SlashCommandBuilder().setName('play').setDescription('Reproduce una canción')
+    .addStringOption(o => o.setName('busqueda').setDescription('Nombre o URL').setRequired(true)),
+  new SlashCommandBuilder().setName('skip').setDescription('Salta la canción actual'),
   new SlashCommandBuilder().setName('pause').setDescription('Pausa la reproducción'),
   new SlashCommandBuilder().setName('resume').setDescription('Reanuda la reproducción'),
-  new SlashCommandBuilder().setName('skip').setDescription('Salta a la siguiente canción'),
-  new SlashCommandBuilder().setName('volume')
-    .setDescription('Cambia el volumen')
-    .addIntegerOption(o => o.setName('nivel').setDescription('Volumen de 0 a 100').setRequired(true).setMinValue(0).setMaxValue(100)),
-  new SlashCommandBuilder().setName('play')
-    .setDescription('Reproduce una canción')
-    .addStringOption(o => o.setName('busqueda').setDescription('Nombre de la canción o artista').setRequired(true)),
-  new SlashCommandBuilder().setName('together').setDescription('Crea una sala de Listen Together y pone el código acá'),
-  new SlashCommandBuilder().setName('status').setDescription('Estado del bot y la app'),
+  new SlashCommandBuilder().setName('queue').setDescription('Muestra la cola de reproducción'),
+  new SlashCommandBuilder().setName('leave').setDescription('Desconecta al bot del canal de voz')
 ];
 
 async function registerSlashCommands() {
+  if (!DISCORD_TOKEN) return console.error('[Bot] ❌ No hay DISCORD_TOKEN en env.');
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
     await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), {
       body: slashCommands.map(c => c.toJSON())
     });
-    console.log('[Bot] ✅ Slash commands registrados');
+    console.log('[Bot] ✅ Slash commands de Voz registrados');
   } catch (err) {
     console.error('[Bot] ❌ Error registrando commands:', err.message);
   }
 }
 
-function sendBotCommand(interaction, type, extra = {}) {
-  if (!controllerSocket?.connected) {
-    return interaction.editReply({ content: '❌ La app de YouTube Music no está conectada al bot.' });
-  }
-  const commandId = Math.random().toString(36).slice(2, 10);
-  pendingCmds.set(commandId, interaction);
-
-  controllerSocket.emit('bot-command', { commandId, type, ...extra });
-
-  // Timeout de 12s si la app no responde
-  setTimeout(() => {
-    if (pendingCmds.has(commandId)) {
-      pendingCmds.delete(commandId);
-      interaction.editReply({ content: '⏱️ La app no respondió a tiempo.' }).catch(() => {});
-    }
-  }, 12000);
-}
-
 function initDiscordBot() {
-  discordClient = new Client({ intents: [GatewayIntentBits.Guilds] });
+  discordClient = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
 
   discordClient.once('ready', () => {
-    console.log(`[Bot] ✅ Online como ${discordClient.user.tag}`);
+    console.log(`[Bot] ✅ Online como ${discordClient.user.tag} (Modo Servidor de Voz)`);
     discordClient.user.setActivity('YouTube Music', { type: ActivityType.Listening });
     registerSlashCommands();
   });
@@ -186,217 +247,166 @@ function initDiscordBot() {
 
     const cmd = interaction.commandName;
 
-    // /status no necesita la app conectada
-    if (cmd === 'status') {
-      const appOnline = !!controllerSocket?.connected;
+    if (cmd === 'play') {
+      const query = interaction.options.getString('busqueda');
+      const voiceChannel = interaction.member.voice.channel;
+      if (!voiceChannel) return interaction.editReply('❌ Tenés que estar en un canal de voz.');
+      
+      const joined = await ensureVoiceConnection(voiceChannel);
+      if (!joined) return interaction.editReply('❌ No pude unirme al canal de voz.');
+      
+      const res = await searchAndAdd(query, interaction.user.tag);
+      if (res.error) return interaction.editReply(`❌ ${res.error}`);
+      
       const embed = new EmbedBuilder()
-        .setColor(appOnline ? 0x22c55e : 0xff4444)
-        .setTitle('📊 Estado del YTMD Bot')
-        .addFields(
-          { name: '🤖 Bot',         value: '✅ Online',                                   inline: true },
-          { name: '🖥️ App',         value: appOnline ? '✅ Conectada' : '❌ Desconectada', inline: true },
-          { name: '🎵 Salas activas', value: `${rooms.size}`,                              inline: true }
-        )
-        .setFooter({ text: 'YTMD Bot' });
+        .setColor(0x22c55e)
+        .setTitle('🎵 Agregado a la cola')
+        .setDescription(`**${res.song.title}**`)
+        .setThumbnail(res.song.thumbnail);
       return interaction.editReply({ embeds: [embed] });
     }
 
-    if (cmd === 'now-playing') return sendBotCommand(interaction, 'now-playing');
-    if (cmd === 'pause')       return sendBotCommand(interaction, 'pause');
-    if (cmd === 'resume')      return sendBotCommand(interaction, 'resume');
-    if (cmd === 'skip')        return sendBotCommand(interaction, 'skip');
-    if (cmd === 'together')    return sendBotCommand(interaction, 'together');
-    if (cmd === 'volume')      return sendBotCommand(interaction, 'volume', { level: interaction.options.getInteger('nivel') });
-    if (cmd === 'play')        return sendBotCommand(interaction, 'play',   { query: interaction.options.getString('busqueda') });
+    if (cmd === 'skip') {
+      if (!isPlaying) return interaction.editReply('❌ No hay nada sonando.');
+      audioPlayer.stop(); // Dispara Idle -> playNext()
+      return interaction.editReply('⏭️ Canción saltada.');
+    }
+
+    if (cmd === 'pause') {
+      if (!isPlaying) return interaction.editReply('❌ No hay nada sonando.');
+      audioPlayer.pause();
+      return interaction.editReply('⏸️ Pausado.');
+    }
+
+    if (cmd === 'resume') {
+      if (audioPlayer.state.status !== AudioPlayerStatus.Paused) return interaction.editReply('❌ El bot no está pausado.');
+      audioPlayer.unpause();
+      return interaction.editReply('▶️ Reanudado.');
+    }
+    
+    if (cmd === 'leave') {
+       if (voiceConnection) {
+           voiceConnection.destroy();
+           voiceConnection = null;
+           isPlaying = false;
+           currentSong = null;
+           queue = [];
+           broadcastBotState();
+           return interaction.editReply('👋 Desconectado.');
+       }
+       return interaction.editReply('❌ No estoy en un canal de voz.');
+    }
+
+    if (cmd === 'queue') {
+      if (!currentSong) return interaction.editReply('La cola está vacía.');
+      let desc = `**Sonando ahora:**\n${currentSong.title}\n\n**En cola:**\n`;
+      if (queue.length === 0) desc += '*Ninguna*';
+      else queue.forEach((s, i) => desc += `${i + 1}. ${s.title}\n`);
+      const embed = new EmbedBuilder().setColor(0x60a5fa).setTitle('📋 Cola de Reproducción').setDescription(desc);
+      return interaction.editReply({ embeds: [embed] });
+    }
   });
 
-  discordClient.login(DISCORD_TOKEN).catch(err => {
-    console.error('[Bot] ❌ Login fallido:', err.message);
-  });
+  if (DISCORD_TOKEN) discordClient.login(DISCORD_TOKEN).catch(e => console.error('[Bot] Login fallido:', e));
 }
 
 initDiscordBot();
 
 // ─── Socket.io ────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`[Server] Connected: ${socket.id}`);
+  console.log(`[Server] Socket connected: ${socket.id}`);
+  
+  // Enviar estado inicial del bot al conectarse la app
+  socket.emit('bot-state-update', { isPlaying, currentSong, queue: queue.map(s => ({ title: s.title, duration: s.duration, thumbnail: s.thumbnail })) });
 
-  // ── BOT CONTROLLER: el plugin DiscordBot.js se identifica acá ────────────
-  socket.on('bot-identify', (secret) => {
-    if (secret === BOT_SECRET) {
-      controllerSocket = socket;
-      console.log(`[Bot] 🎮 App controller conectada: ${socket.id}`);
-      socket.emit('bot-identify-ack', { ok: true });
+  // Comandos de voz que llegan desde el dashboard de la app local
+  socket.on('bot-action-play', async (query) => {
+    const joined = await ensureVoiceConnection(null);
+    if (!joined) return socket.emit('bot-error', 'El bot no pudo encontrar un canal de voz. Entrá a uno en Discord primero.');
+    const res = await searchAndAdd(query, 'App YTMD');
+    if (res.error) socket.emit('bot-error', res.error);
+  });
+  
+  socket.on('bot-action-skip', () => { if (isPlaying) audioPlayer.stop(); });
+  socket.on('bot-action-pause', () => { audioPlayer.pause(); });
+  socket.on('bot-action-resume', () => { audioPlayer.unpause(); });
+  socket.on('bot-action-leave', () => {
+    if (voiceConnection) {
+       voiceConnection.destroy();
+       voiceConnection = null;
+       isPlaying = false;
+       currentSong = null;
+       queue = [];
+       broadcastBotState();
     }
   });
 
-  // ── BOT RESULT: la app ejecutó el comando y devuelve el resultado ─────────
-  socket.on('bot-result', (result) => {
-    const interaction = pendingCmds.get(result.commandId);
-    if (!interaction) return;
-    pendingCmds.delete(result.commandId);
 
-    if (result.error) {
-      return interaction.editReply({ content: `❌ ${result.error}` }).catch(() => {});
-    }
-
-    let embed;
-    switch (result.type) {
-      case 'now-playing':
-        embed = buildNowPlayingEmbed(result.data);
-        break;
-      case 'pause':
-        embed = new EmbedBuilder().setColor(0xfbbf24).setTitle('⏸ Pausado').setDescription(`**${result.data?.title || ''}**`);
-        break;
-      case 'resume':
-        embed = new EmbedBuilder().setColor(0x22c55e).setTitle('▶️ Reanudando').setDescription(`**${result.data?.title || ''}**`);
-        break;
-      case 'skip':
-        embed = new EmbedBuilder().setColor(0x60a5fa).setTitle('⏭ Saltando canción').setDescription(result.data?.title ? `Siguiente: **${result.data.title}**` : '');
-        break;
-      case 'volume':
-        embed = new EmbedBuilder().setColor(0xa78bfa).setTitle(`🔊 Volumen: ${result.data?.level}%`);
-        break;
-      case 'play':
-        embed = new EmbedBuilder().setColor(0x22c55e).setTitle('▶️ Reproduciendo').setDescription(`**${result.data?.title || result.data?.query || ''}**`).setThumbnail(result.data?.thumbnail || null);
-        break;
-      case 'together':
-        embed = new EmbedBuilder()
-          .setColor(0xFF0000)
-          .setTitle('🎵 Sala de Listen Together creada')
-          .setDescription(`Código: \`${result.data?.code}\`\nUsá este código en la app para unirte.`);
-        break;
-      default:
-        embed = new EmbedBuilder().setColor(0x22c55e).setTitle('✅ Listo');
-    }
-
-    interaction.editReply({ embeds: [embed] }).catch(() => {});
-  });
-
-  // ── CREATE ROOM ───────────────────────────────────────────────────────────
+  // ── ListenTogether Protocol ───────────────────────────────────────────────
   socket.on('create-room', async (displayName, userId, cb) => {
-    if (typeof displayName === 'function') { cb = displayName; displayName = 'Host'; userId = null; }
-    if (typeof userId === 'function') { cb = userId; userId = null; }
     if (typeof cb !== 'function') return;
-
     const tier = await fetchUserTier(userId);
+    if (rooms.size >= MAX_ROOMS) return cb({ error: 'Servidor lleno.' });
 
-    if (rooms.size >= MAX_ROOMS) return cb({ error: 'El servidor está al límite de salas activas. Intentá de nuevo más tarde.' });
-
-    let code, attempts = 0;
-    do { code = generateRoomCode(); attempts++; } while (rooms.has(code) && attempts < 10);
-    if (rooms.has(code)) return cb({ error: 'No se pudo generar un código único. Intentá de nuevo.' });
-
-    rooms.set(code, {
-      host: socket.id,
-      tier: tier || 'free',
-      members: new Set([socket.id]),
-      lastActivity: Date.now(),
-      createdAt: Date.now()
-    });
+    let code;
+    do { code = generateRoomCode(); } while (rooms.has(code));
+    rooms.set(code, { host: socket.id, tier: tier || 'free', members: new Set([socket.id]), lastActivity: Date.now() });
 
     socket.join(code);
-    socket.data.roomCode = code;
-    socket.data.isHost = true;
-    socket.data.displayName = typeof displayName === 'string' ? displayName.slice(0, 30) : 'Host';
-
-    console.log(`[Server] Room created: ${code} by ${socket.id}`);
+    socket.data = { roomCode: code, isHost: true, displayName: displayName || 'Host' };
     cb({ code });
   });
 
-  // ── JOIN ROOM ─────────────────────────────────────────────────────────────
   socket.on('join-room', (code, displayName, cb) => {
-    if (typeof cb !== 'function') return;
-    if (typeof code !== 'string' || code.length !== 8) return cb({ error: 'Código inválido.' });
-
+    if (typeof cb !== 'function' || !code) return;
     const room = rooms.get(code.toUpperCase());
-    if (!room) return cb({ error: 'Sala no encontrada. Verificá el código.' });
+    if (!room) return cb({ error: 'Sala no encontrada.' });
 
-    const maxMembers = room.tier === 'pro' ? MAX_ROOM_MEMBERS : 3;
-    if (room.members.size >= maxMembers) {
-      return cb({ error: room.tier === 'free' ? 'La sala está llena (máximo 3 personas en plan Free).' : `La sala está llena (máximo ${MAX_ROOM_MEMBERS} personas).` });
-    }
+    const max = room.tier === 'pro' ? MAX_ROOM_MEMBERS : 3;
+    if (room.members.size >= max) return cb({ error: 'Sala llena.' });
 
     room.members.add(socket.id);
     room.lastActivity = Date.now();
     socket.join(code.toUpperCase());
-    socket.data.roomCode = code.toUpperCase();
-    socket.data.isHost = false;
-    socket.data.displayName = typeof displayName === 'string' ? displayName.slice(0, 30) : 'Oyente';
+    socket.data = { roomCode: code.toUpperCase(), isHost: false, displayName: displayName || 'Oyente' };
 
-    socket.to(code.toUpperCase()).emit('member-joined', {
-      id: socket.id, name: socket.data.displayName, count: room.members.size
-    });
-
+    socket.to(code.toUpperCase()).emit('member-joined', { id: socket.id, name: socket.data.displayName, count: room.members.size });
     cb({ success: true, memberCount: room.members.size });
   });
 
-  // ── STATE UPDATE (Host → Listeners) ──────────────────────────────────────
   socket.on('state-update', (state) => {
-    const code = socket.data.roomCode;
+    const code = socket.data?.roomCode;
     const room = rooms.get(code);
-    if (!room || room.host !== socket.id) return;
-    if (!isValidState(state)) return;
+    if (!room || room.host !== socket.id || !isValidState(state)) return;
 
     const now = Date.now();
-    const lastTime = rateLimits.get(socket.id) || 0;
-    if (now - lastTime < RATE_LIMIT_MS) return;
+    if (now - (rateLimits.get(socket.id) || 0) < RATE_LIMIT_MS) return;
     rateLimits.set(socket.id, now);
-
     room.lastActivity = now;
+
     socket.to(code).emit('state-update', state);
   });
 
-  // ── CHAT ─────────────────────────────────────────────────────────────────
-  socket.on('chat-message', (text) => {
-    const code = socket.data.roomCode;
-    const room = rooms.get(code);
-    if (!room) return;
-    if (typeof text !== 'string' || !text.trim() || text.length > 200) return;
-
-    room.lastActivity = Date.now();
-    socket.to(code).emit('chat-message', {
-      from: socket.data.displayName || (socket.data.isHost ? 'Host' : 'Oyente'),
-      text: text.trim().slice(0, 200),
-      ts: Date.now()
-    });
-  });
-
-  // ── DISCONNECT ────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     rateLimits.delete(socket.id);
-
-    // Si era el controller del bot, limpiar referencia
-    if (controllerSocket?.id === socket.id) {
-      controllerSocket = null;
-      console.log('[Bot] ⚠️  App controller desconectada');
-    }
-
-    const code = socket.data.roomCode;
+    const code = socket.data?.roomCode;
     const room = rooms.get(code);
-    if (!room) { console.log(`[Server] Disconnected: ${socket.id}`); return; }
+    if (!room) return;
 
     room.members.delete(socket.id);
-
     if (room.members.size === 0) {
       rooms.delete(code);
-      console.log(`[Server] Room ${code} deleted (empty)`);
     } else if (room.host === socket.id) {
       const newHost = [...room.members][0];
       room.host = newHost;
       io.to(newHost).emit('promoted-to-host');
       io.to(code).emit('host-changed', { newHostId: newHost });
-      console.log(`[Server] Host of ${code} changed to ${newHost}`);
     } else {
       io.to(code).emit('member-left', { id: socket.id, count: room.members.size });
     }
-
-    console.log(`[Server] Disconnected: ${socket.id}`);
   });
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
 httpServer.listen(PORT, () => {
   console.log(`[YTMD Server] Corriendo en http://localhost:${PORT}`);
-  console.log(`[YTMD Server] Health: http://localhost:${PORT}/health`);
 });

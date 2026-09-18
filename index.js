@@ -271,8 +271,15 @@ async function searchAndAdd(query, user) {
       await ytm.initialize();
       const search = await ytm.search(query);
       if (!search || !search.length) return { error: 'No se encontraron resultados.' };
-      targetUrl = `https://music.youtube.com/watch?v=${search[0].videoId}`;
+      targetUrl = `https://www.youtube.com/watch?v=${search[0].videoId}`;
     }
+
+    // Siempre normalizar a youtube.com (el extractor de music.youtube.com falla con --dump-json)
+    if (targetUrl.includes('music.youtube.com')) {
+      const videoId = new URL(targetUrl).searchParams.get('v');
+      if (videoId) targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    }
+    console.log(`[Bot Voice] URL normalizada: ${targetUrl}`);
 
     // Obtener metadata con yt-dlp --dump-json (sin --format para evitar errores)
     const ytArgs = {

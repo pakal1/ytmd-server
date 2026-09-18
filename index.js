@@ -140,8 +140,16 @@ async function playNext() {
 
   try {
     console.log(`[Bot Voice] Buscando stream para: ${currentSong.url}`);
-    const stream = await play.stream(currentSong.url);
-    const resource = createAudioResource(stream.stream, { inputType: stream.type });
+    
+    const yt = require('youtube-dl-exec');
+    const dlProcess = yt.exec(currentSong.url, {
+      output: '-',
+      quiet: true,
+      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best',
+      limitRate: '100K'
+    }, { stdio: ['ignore', 'pipe', 'ignore'] });
+
+    const resource = createAudioResource(dlProcess.stdout);
     audioPlayer.play(resource);
     console.log(`[Bot Voice] Reproduciendo: ${currentSong.title}`);
   } catch (err) {

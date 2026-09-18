@@ -127,8 +127,8 @@ let queue = [];
 let currentSong = null;
 let isPlaying = false;
 let voiceConnection = null;
-let globalYTUserCookie = null;
 let cookiesFilePath = null;
+let currentAudioPassthrough = null; // PassThrough stream fed by Electron client chunks
 
 function saveCookiesToFile(cookiesArray) {
   const lines = ['# Netscape HTTP Cookie File'];
@@ -174,18 +174,23 @@ async function playNext() {
   broadcastBotState();
 
   try {
-    const play = require('play-dl');
-    const clientId = await play.getFreeClientID();
-    play.setToken({ soundcloud: { client_id: clientId } });
+    const { PassThrough } = require('stream');
+    // Destruir el stream anterior si existe
+    if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
+      currentAudioPassthrough.destroy();
+    }
+    currentAudioPassthrough = new PassThrough();
     
-    console.log(`[Bot Voice] Obteniendo stream de SoundCloud para: ${currentSong.scUrl}`);
-    const stream = await play.stream(currentSong.scUrl);
+    // Pedir a la app Electron que streame el audio localmente (tiene IP residencial y cookies)
+    console.log(`[Bot Voice] Solicitando stream local para: ${currentSong.url}`);
+    io.emit('bot-stream-request', { url: currentSong.url });
     
-    const resource = createAudioResource(stream.stream, { inputType: stream.type });
+    const { StreamType } = require('@discordjs/voice');
+    const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.Arbitrary });
     audioPlayer.play(resource);
     console.log(`[Bot Voice] Reproduciendo: ${currentSong.title}`);
   } catch (err) {
-    console.error(`[Bot Voice] Error al reproducir:`, err.message);
+    console.error('[Bot Voice] Error al reproducir:', err.message);
     playNext();
   }
 }
@@ -245,58 +250,48 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 async function searchAndAdd(query, user) {
   try {
     console.log(`[Bot Voice] Buscando: ${query}`);
-    const play = require('play-dl');
     const YTMusic = require('ytmusic-api');
+    const ytm = new YTMusic();
+    await ytm.initialize();
     
-    let searchQuery = query;
-    let fallbackThumbnail = null;
+    let targetUrl;
+    let title = query;
+    let thumbnail = null;
+    let duration = 0;
 
-    // Si es un link de YouTube/YouTube Music, extraer el ID y obtener el título real
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      // Es una URL directa de YouTube — extraer videoId para obtener metadata
       let videoId = null;
       if (query.includes('v=')) videoId = new URL(query).searchParams.get('v');
       else if (query.includes('youtu.be/')) videoId = query.split('youtu.be/')[1].split('?')[0];
       
+      // Normalizar a youtube.com (por si es music.youtube.com)
+      targetUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : query;
+      
       if (videoId) {
-        const ytm = new YTMusic();
-        await ytm.initialize();
         try {
           const songInfo = await ytm.getSong(videoId);
-          if (songInfo && songInfo.name) {
-            searchQuery = `${songInfo.name} ${songInfo.artists?.[0]?.name || ''}`;
-            if (songInfo.thumbnails?.length > 0) {
-              fallbackThumbnail = songInfo.thumbnails[songInfo.thumbnails.length - 1].url;
-            }
+          if (songInfo?.name) {
+            title = songInfo.name;
+            duration = songInfo.duration ?? 0;
+            thumbnail = songInfo.thumbnails?.slice(-1)[0]?.url ?? null;
           }
         } catch (e) {
-          console.log('[Bot Voice] No se pudo resolver metadata de YT, usando URL como fallback.');
+          console.log('[Bot Voice] No se pudo resolver metadata del video.');
         }
       }
+    } else {
+      // Búsqueda por texto — encontrar en YouTube Music
+      const results = await ytm.search(query);
+      if (!results || results.length === 0) return { error: 'No se encontraron resultados.' };
+      const top = results[0];
+      targetUrl = `https://www.youtube.com/watch?v=${top.videoId}`;
+      title = top.name ?? top.title ?? query;
+      duration = top.duration ?? 0;
+      thumbnail = top.thumbnails?.slice(-1)[0]?.url ?? null;
     }
 
-    console.log(`[Bot Voice] Consultando SoundCloud: ${searchQuery}`);
-    
-    if (!play.getFreeClientID().is_cached) {
-      const clientId = await play.getFreeClientID();
-      play.setToken({ soundcloud: { client_id: clientId } });
-    }
-    
-    // Buscar en SoundCloud
-    const scResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
-    if (!scResults || scResults.length === 0) {
-      return { error: 'No se encontró la canción en los servidores de audio (SoundCloud bridge).' };
-    }
-    
-    const track = scResults[0];
-    
-    const song = {
-      title: track.name,
-      url: track.permalink,
-      scUrl: track.permalink,  // permalink URL funciona con play.stream(), la .url interna no
-      thumbnail: fallbackThumbnail || track.thumbnail,
-      duration: track.durationInSec,
-      user
-    };
+    const song = { title, url: targetUrl, thumbnail, duration, user };
     
     queue.push(song);
     if (!isPlaying) {
@@ -426,14 +421,35 @@ io.on('connection', (socket) => {
   socket.emit('bot-state-update', { isPlaying, currentSong, queue: queue.map(s => ({ title: s.title, duration: s.duration, thumbnail: s.thumbnail })) });
 
   // Comandos de voz que llegan desde el dashboard de la app local
-  socket.on('bot-sync-cookies', (cookieStr) => {
+  socket.on('bot-sync-cookies', (cookiesData) => {
     try {
-      globalYTUserCookie = cookieStr;
-      cookiesFilePath = saveCookiesToFile(cookieStr);
+      cookiesFilePath = saveCookiesToFile(Array.isArray(cookiesData) ? cookiesData : []);
       console.log(`[Bot] Cookies guardadas en archivo: ${cookiesFilePath}`);
     } catch (e) {
       console.error('[Bot] Error guardando cookies:', e);
     }
+  });
+
+  // ─── Streaming de audio desde la app Electron (IP residencial) ─────────────
+  socket.on('bot-audio-chunk', (chunk) => {
+    if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
+      currentAudioPassthrough.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+  });
+
+  socket.on('bot-audio-end', () => {
+    if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
+      currentAudioPassthrough.end();
+    }
+  });
+
+  socket.on('bot-audio-error', (errMsg) => {
+    console.error('[Bot Voice] Error de stream desde cliente:', errMsg);
+    if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
+      currentAudioPassthrough.destroy(new Error(errMsg));
+    }
+    // Intentar siguiente canción
+    setTimeout(() => playNext(), 500);
   });
 
   socket.on('bot-action-play', async (query) => {

@@ -210,9 +210,16 @@ async function searchAndAdd(query, user) {
        const info = await play.video_info(query);
        video = info.video_details;
     } else {
-       const search = await play.search(query, { limit: 1 });
-       if (!search.length) return { error: 'No se encontraron resultados en YouTube.' };
-       video = search[0];
+       const YTMusic = require('ytmusic-api');
+       const yt = new YTMusic();
+       await yt.initialize();
+       
+       const search = await yt.search(query);
+       if (!search || !search.length) return { error: 'No se encontraron resultados en YouTube.' };
+       
+       const foundUrl = `https://music.youtube.com/watch?v=${search[0].videoId}`;
+       const info = await play.video_info(foundUrl);
+       video = info.video_details;
     }
     
     const song = {

@@ -175,15 +175,34 @@ async function playNext() {
 
   try {
     const { PassThrough } = require('stream');
-    // Destruir el stream anterior si existe
     if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
       currentAudioPassthrough.destroy();
     }
     currentAudioPassthrough = new PassThrough();
     
-    // Pedir a la app Electron que streame el audio localmente (tiene IP residencial y cookies)
     console.log(`[Bot Voice] Solicitando stream local para: ${currentSong.url}`);
-    io.emit('bot-stream-request', { url: currentSong.url });
+    
+    // Esperar el primer chunk ANTES de pasar el stream a Discord
+    // (si no, ffmpeg empieza con buffer vacío y da TimeoutNegativeWarning)
+    await new Promise((resolve) => {
+      const onFirstData = () => {
+        console.log('[Bot Voice] Primer chunk recibido — iniciando player');
+        resolve();
+      };
+      currentAudioPassthrough.once('data', onFirstData);
+      
+      // Timeout de seguridad: si en 8s no llega nada, intentar igual
+      const fallback = setTimeout(() => {
+        currentAudioPassthrough.removeListener('data', onFirstData);
+        console.warn('[Bot Voice] Timeout esperando primer chunk — iniciando sin datos');
+        resolve();
+      }, 8000);
+      
+      // Limpiar timeout si llega el primer dato
+      currentAudioPassthrough.once('data', () => clearTimeout(fallback));
+      
+      io.emit('bot-stream-request', { url: currentSong.url });
+    });
     
     const { StreamType } = require('@discordjs/voice');
     const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.Arbitrary });
@@ -431,7 +450,11 @@ io.on('connection', (socket) => {
   });
 
   // ─── Streaming de audio desde la app Electron (IP residencial) ─────────────
+  let _chunkCount = 0;
   socket.on('bot-audio-chunk', (chunk) => {
+    _chunkCount++;
+    if (_chunkCount === 1) console.log('[Bot Voice] ✅ Primer chunk de audio recibido desde cliente');
+    if (_chunkCount % 50 === 0) console.log(`[Bot Voice] Chunks recibidos: ${_chunkCount}`);
     if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
       currentAudioPassthrough.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
     }

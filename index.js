@@ -232,6 +232,7 @@ async function searchAndAdd(query, user) {
     
     return { song };
   } catch (err) {
+    console.error('[Bot Voice] Error en searchAndAdd:', err);
     return { error: 'Error interno buscando la canción.' };
   }
 }

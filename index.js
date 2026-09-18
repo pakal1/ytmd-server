@@ -139,9 +139,11 @@ async function playNext() {
   broadcastBotState();
 
   try {
+    console.log(`[Bot Voice] Buscando stream para: ${currentSong.url}`);
     const stream = await play.stream(currentSong.url);
     const resource = createAudioResource(stream.stream, { inputType: stream.type });
     audioPlayer.play(resource);
+    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title}`);
   } catch (err) {
     console.error('[Bot Voice] Error al reproducir:', err.message);
     playNext(); // Saltar a la siguiente si hay error
@@ -168,6 +170,7 @@ async function ensureVoiceConnection(memberVoiceChannel) {
   if (!targetChannel) return false;
   
   try {
+    console.log(`[Bot Voice] Intentando unir al canal: ${targetChannel.name} (ID: ${targetChannel.id})`);
     voiceConnection = joinVoiceChannel({
         channelId: targetChannel.id,
         guildId: targetChannel.guild.id,
@@ -175,7 +178,16 @@ async function ensureVoiceConnection(memberVoiceChannel) {
     });
     voiceConnection.subscribe(audioPlayer);
     
+    voiceConnection.on(VoiceConnectionStatus.Ready, () => {
+      console.log('[Bot Voice] Conexión de voz establecida (Ready)');
+    });
+
+    voiceConnection.on('error', (err) => {
+      console.error('[Bot Voice] Error en la conexión UDP:', err.message);
+    });
+    
     voiceConnection.on(VoiceConnectionStatus.Disconnected, () => {
+      console.log('[Bot Voice] Desconectado del canal de voz');
       voiceConnection.destroy();
       voiceConnection = null;
       isPlaying = false;
@@ -192,6 +204,7 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 
 async function searchAndAdd(query, user) {
   try {
+    console.log(`[Bot Voice] Buscando: ${query}`);
     let video;
     if (query.startsWith('http')) {
        const info = await play.video_info(query);

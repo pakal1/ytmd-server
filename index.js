@@ -183,7 +183,8 @@ async function playNext() {
       noWarnings: true,
       extractAudio: true,
       audioFormat: 'opus',
-      audioQuality: 0
+      audioQuality: 0,
+      extractorArgs: 'youtube:player_client=android'
     };
     if (cookiesFilePath) {
       args.cookies = cookiesFilePath;
@@ -286,7 +287,8 @@ async function searchAndAdd(query, user) {
     const ytArgs = {
       dumpJson: true,
       noWarnings: true,
-      noPlaylist: true
+      noPlaylist: true,
+      extractorArgs: 'youtube:player_client=android'
     };
     if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
     

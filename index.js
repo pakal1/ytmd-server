@@ -224,28 +224,37 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 async function searchAndAdd(query, user) {
   try {
     console.log(`[Bot Voice] Buscando: ${query}`);
-    let video;
+    const yt = require('youtube-dl-exec');
+    
+    let targetUrl;
     if (query.startsWith('http')) {
-       const info = await play.video_info(query);
-       video = info.video_details;
+      targetUrl = query;
     } else {
-       const YTMusic = require('ytmusic-api');
-       const yt = new YTMusic();
-       await yt.initialize();
-       
-       const search = await yt.search(query);
-       if (!search || !search.length) return { error: 'No se encontraron resultados en YouTube.' };
-       
-       const foundUrl = `https://music.youtube.com/watch?v=${search[0].videoId}`;
-       const info = await play.video_info(foundUrl);
-       video = info.video_details;
+      // Usar ytmusic-api para buscar el videoId, luego construir URL
+      const YTMusic = require('ytmusic-api');
+      const ytm = new YTMusic();
+      await ytm.initialize();
+      const search = await ytm.search(query);
+      if (!search || !search.length) return { error: 'No se encontraron resultados.' };
+      targetUrl = `https://music.youtube.com/watch?v=${search[0].videoId}`;
     }
+
+    // Obtener metadata con yt-dlp --dump-json (bypasa todo bloqueo)
+    const ytArgs = {
+      dumpJson: true,
+      noWarnings: true,
+      noPlaylist: true,
+      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
+    };
+    if (globalYTUserCookie) ytArgs.addHeader = `Cookie: ${globalYTUserCookie}`;
+    
+    const info = await yt(targetUrl, ytArgs);
     
     const song = {
-      title: video.title,
-      url: video.url,
-      thumbnail: video.thumbnails?.[0]?.url,
-      duration: video.durationInSec,
+      title: info.title,
+      url: info.webpage_url,
+      thumbnail: info.thumbnail,
+      duration: info.duration,
       user
     };
     
@@ -253,7 +262,7 @@ async function searchAndAdd(query, user) {
     if (!isPlaying) {
       await playNext();
     } else {
-      broadcastBotState(); // Update queue
+      broadcastBotState();
     }
     
     return { song };

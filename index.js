@@ -2,6 +2,9 @@ const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const https = require('https');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const {
   Client, GatewayIntentBits, REST, Routes,
   SlashCommandBuilder, EmbedBuilder, ActivityType
@@ -112,6 +115,22 @@ let currentSong = null;
 let isPlaying = false;
 let voiceConnection = null;
 let globalYTUserCookie = null;
+let cookiesFilePath = null;
+
+// Converts "name=value; name2=value2" cookie string to Netscape cookie file format
+function saveCookiesToFile(cookieStr) {
+  const lines = ['# Netscape HTTP Cookie File'];
+  for (const pair of cookieStr.split(';')) {
+    const idx = pair.indexOf('=');
+    if (idx === -1) continue;
+    const name = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    lines.push(`.youtube.com\tTRUE\t/\tTRUE\t9999999999\t${name}\t${value}`);
+  }
+  const tmpPath = path.join(os.tmpdir(), 'yt_cookies.txt');
+  fs.writeFileSync(tmpPath, lines.join('\n'));
+  return tmpPath;
+}
 const audioPlayer = createAudioPlayer();
 
 // Broadcast bot state to all connected dashboard apps
@@ -149,8 +168,8 @@ async function playNext() {
       noWarnings: true,
       format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
     };
-    if (globalYTUserCookie) {
-      args.addHeader = `Cookie: ${globalYTUserCookie}`;
+    if (cookiesFilePath) {
+      args.cookies = cookiesFilePath;
     }
 
     const dlProcess = yt.exec(currentSong.url, args, { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -246,7 +265,7 @@ async function searchAndAdd(query, user) {
       noPlaylist: true,
       format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
     };
-    if (globalYTUserCookie) ytArgs.addHeader = `Cookie: ${globalYTUserCookie}`;
+    if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
     
     const info = await yt(targetUrl, ytArgs);
     
@@ -389,7 +408,8 @@ io.on('connection', (socket) => {
   socket.on('bot-sync-cookies', (cookieStr) => {
     try {
       globalYTUserCookie = cookieStr;
-      console.log(`[Bot] Cookies guardadas globalmente para streams (socket: ${socket.id})`);
+      cookiesFilePath = saveCookiesToFile(cookieStr);
+      console.log(`[Bot] Cookies guardadas en archivo: ${cookiesFilePath}`);
     } catch (e) {
       console.error('[Bot] Error guardando cookies:', e);
     }

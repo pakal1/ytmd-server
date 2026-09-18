@@ -269,9 +269,7 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 async function searchAndAdd(query, user) {
   try {
     console.log(`[Bot Voice] Buscando: ${query}`);
-    const YTMusic = require('ytmusic-api');
-    const ytm = new YTMusic();
-    await ytm.initialize();
+    const play = require('play-dl');
     
     let targetUrl;
     let title = query;
@@ -279,35 +277,30 @@ async function searchAndAdd(query, user) {
     let duration = 0;
 
     if (query.includes('youtube.com') || query.includes('youtu.be')) {
-      // Es una URL directa de YouTube — extraer videoId para obtener metadata
       let videoId = null;
       if (query.includes('v=')) videoId = new URL(query).searchParams.get('v');
       else if (query.includes('youtu.be/')) videoId = query.split('youtu.be/')[1].split('?')[0];
       
-      // Normalizar a youtube.com (por si es music.youtube.com)
       targetUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : query;
       
-      if (videoId) {
-        try {
-          const songInfo = await ytm.getSong(videoId);
-          if (songInfo?.name) {
-            title = songInfo.name;
-            duration = songInfo.duration ?? 0;
-            thumbnail = songInfo.thumbnails?.slice(-1)[0]?.url ?? null;
-          }
-        } catch (e) {
-          console.log('[Bot Voice] No se pudo resolver metadata del video.');
+      try {
+        const info = await play.video_info(targetUrl);
+        if (info && info.video_details) {
+          title = info.video_details.title;
+          duration = info.video_details.durationInSec;
+          thumbnail = info.video_details.thumbnails?.slice(-1)[0]?.url || null;
         }
+      } catch (e) {
+        console.log('[Bot Voice] No se pudo resolver metadata del video.');
       }
     } else {
-      // Búsqueda por texto — encontrar en YouTube Music
-      const results = await ytm.search(query);
+      const results = await play.search(query, { limit: 1 });
       if (!results || results.length === 0) return { error: 'No se encontraron resultados.' };
       const top = results[0];
-      targetUrl = `https://www.youtube.com/watch?v=${top.videoId}`;
-      title = top.name ?? top.title ?? query;
-      duration = top.duration ?? 0;
-      thumbnail = top.thumbnails?.slice(-1)[0]?.url ?? null;
+      targetUrl = top.url;
+      title = top.title || query;
+      duration = top.durationInSec || 0;
+      thumbnail = top.thumbnails?.slice(-1)[0]?.url || null;
     }
 
     const song = { title, url: targetUrl, thumbnail, duration, user };

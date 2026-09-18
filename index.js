@@ -269,7 +269,7 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 async function searchAndAdd(query, user) {
   try {
     console.log(`[Bot Voice] Buscando: ${query}`);
-    const play = require('play-dl');
+    const YouTube = require('youtube-sr').default;
     
     let targetUrl;
     let title = query;
@@ -284,23 +284,23 @@ async function searchAndAdd(query, user) {
       targetUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : query;
       
       try {
-        const info = await play.video_info(targetUrl);
-        if (info && info.video_details) {
-          title = info.video_details.title;
-          duration = info.video_details.durationInSec;
-          thumbnail = info.video_details.thumbnails?.slice(-1)[0]?.url || null;
+        const info = await YouTube.getVideo(targetUrl);
+        if (info) {
+          title = info.title;
+          duration = info.duration / 1000;
+          thumbnail = info.thumbnail?.url || null;
         }
       } catch (e) {
         console.log('[Bot Voice] No se pudo resolver metadata del video.');
       }
     } else {
-      const results = await play.search(query, { limit: 1 });
+      const results = await YouTube.search(query, { limit: 1, type: 'video' });
       if (!results || results.length === 0) return { error: 'No se encontraron resultados.' };
       const top = results[0];
-      targetUrl = top.url;
+      targetUrl = `https://www.youtube.com/watch?v=${top.id}`;
       title = top.title || query;
-      duration = top.durationInSec || 0;
-      thumbnail = top.thumbnails?.slice(-1)[0]?.url || null;
+      duration = top.duration / 1000 || 0;
+      thumbnail = top.thumbnail?.url || null;
     }
 
     const song = { title, url: targetUrl, thumbnail, duration, user };

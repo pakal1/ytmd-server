@@ -119,8 +119,7 @@ app.get('/health', (_req, res) => {
 });
 
 const io = new Server(httpServer, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
-  maxHttpBufferSize: 2 * 1024
+  cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
 // ─── Discord Voice Player State ───────────────────────────────────────────────

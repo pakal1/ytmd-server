@@ -186,7 +186,10 @@ async function playNext() {
       audioQuality: 0,
       extractorArgs: 'youtube:player_client=android'
     };
-    if (cookiesFilePath) {
+    const tmpCookiePath = require('path').join(require('os').tmpdir(), 'yt_cookies.txt');
+    if (require('fs').existsSync(tmpCookiePath)) {
+      args.cookies = tmpCookiePath;
+    } else if (cookiesFilePath) {
       args.cookies = cookiesFilePath;
     }
 
@@ -290,7 +293,9 @@ async function searchAndAdd(query, user) {
       noPlaylist: true,
       extractorArgs: 'youtube:player_client=android'
     };
-    if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
+    const tmpCookiePath = require('path').join(require('os').tmpdir(), 'yt_cookies.txt');
+    if (require('fs').existsSync(tmpCookiePath)) ytArgs.cookies = tmpCookiePath;
+    else if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
     
     const info = await yt(targetUrl, ytArgs);
     

@@ -351,6 +351,15 @@ io.on('connection', (socket) => {
   socket.emit('bot-state-update', { isPlaying, currentSong, queue: queue.map(s => ({ title: s.title, duration: s.duration, thumbnail: s.thumbnail })) });
 
   // Comandos de voz que llegan desde el dashboard de la app local
+  socket.on('bot-sync-cookies', (cookieStr) => {
+    try {
+      play.setToken({ youtube: { cookie: cookieStr } });
+      console.log(`[Bot] Cookies sincronizadas desde la app local para ${socket.id}`);
+    } catch (e) {
+      console.error('[Bot] Error seteando cookies:', e);
+    }
+  });
+
   socket.on('bot-action-play', async (query) => {
     const joined = await ensureVoiceConnection(null);
     if (!joined) return socket.emit('bot-error', 'El bot no pudo encontrar un canal de voz. Entrá a uno en Discord primero.');

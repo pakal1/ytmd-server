@@ -131,15 +131,17 @@ let voiceConnection = null;
 let globalYTUserCookie = null;
 let cookiesFilePath = null;
 
-// Converts "name=value; name2=value2" cookie string to Netscape cookie file format
-function saveCookiesToFile(cookieStr) {
+function saveCookiesToFile(cookiesArray) {
   const lines = ['# Netscape HTTP Cookie File'];
-  for (const pair of cookieStr.split(';')) {
-    const idx = pair.indexOf('=');
-    if (idx === -1) continue;
-    const name = pair.slice(0, idx).trim();
-    const value = pair.slice(idx + 1).trim();
-    lines.push(`.youtube.com\tTRUE\t/\tTRUE\t9999999999\t${name}\t${value}`);
+  for (const c of cookiesArray) {
+    if (!c.name || !c.value) continue;
+    const domain = c.domain || '.youtube.com';
+    const subdomains = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const path = c.path || '/';
+    const secure = c.secure ? 'TRUE' : 'FALSE';
+    // If expirationDate is 0 or missing, yt-dlp expects 0
+    const expires = c.expirationDate ? Math.floor(c.expirationDate) : 0;
+    lines.push(`${domain}\t${subdomains}\t${path}\t${secure}\t${expires}\t${c.name}\t${c.value}`);
   }
   const tmpPath = path.join(os.tmpdir(), 'yt_cookies.txt');
   fs.writeFileSync(tmpPath, lines.join('\n'));

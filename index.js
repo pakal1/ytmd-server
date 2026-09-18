@@ -175,10 +175,8 @@ async function playNext() {
 
   try {
     const play = require('play-dl');
-    if (!play.getFreeClientID().is_cached) {
-      const clientId = await play.getFreeClientID();
-      play.setToken({ soundcloud: { client_id: clientId } });
-    }
+    const clientId = await play.getFreeClientID();
+    play.setToken({ soundcloud: { client_id: clientId } });
     
     console.log(`[Bot Voice] Obteniendo stream de SoundCloud para: ${currentSong.scUrl}`);
     const stream = await play.stream(currentSong.scUrl);
@@ -293,8 +291,8 @@ async function searchAndAdd(query, user) {
     
     const song = {
       title: track.name,
-      url: track.url,
-      scUrl: track.url,
+      url: track.permalink,
+      scUrl: track.permalink,  // permalink URL funciona con play.stream(), la .url interna no
       thumbnail: fallbackThumbnail || track.thumbnail,
       duration: track.durationInSec,
       user

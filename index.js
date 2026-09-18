@@ -174,38 +174,21 @@ async function playNext() {
   broadcastBotState();
 
   try {
-    console.log(`[Bot Voice] Buscando stream para: ${currentSong.url}`);
-    
-    const yt = require('youtube-dl-exec');
-    const args = {
-      output: '-',
-      quiet: true,
-      noWarnings: true,
-      extractAudio: true,
-      audioFormat: 'opus',
-      audioQuality: 0,
-      extractorArgs: 'youtube:player_client=android'
-    };
-    const tmpCookiePath = require('path').join(require('os').tmpdir(), 'yt_cookies.txt');
-    if (require('fs').existsSync(tmpCookiePath)) {
-      args.cookies = tmpCookiePath;
-    } else if (cookiesFilePath) {
-      args.cookies = cookiesFilePath;
+    const play = require('play-dl');
+    if (!play.getFreeClientID().is_cached) {
+      const clientId = await play.getFreeClientID();
+      play.setToken({ soundcloud: { client_id: clientId } });
     }
-
-    const dlProcess = yt.exec(currentSong.url, args, { stdio: ['ignore', 'pipe', 'ignore'] });
     
-    // Evitar que un error en yt-dlp (como IP bloqueada) crashee todo el server
-    dlProcess.catch(err => {
-      console.error('[Bot Voice] Error en yt-dlp:', err.message);
-    });
-
-    const resource = createAudioResource(dlProcess.stdout);
+    console.log(`[Bot Voice] Obteniendo stream de SoundCloud para: ${currentSong.scUrl}`);
+    const stream = await play.stream(currentSong.scUrl);
+    
+    const resource = createAudioResource(stream.stream, { inputType: stream.type });
     audioPlayer.play(resource);
     console.log(`[Bot Voice] Reproduciendo: ${currentSong.title}`);
   } catch (err) {
-    console.error('[Bot Voice] Error al reproducir:', err.message);
-    playNext(); // Saltar a la siguiente si hay error
+    console.error(`[Bot Voice] Error al reproducir:`, err.message);
+    playNext();
   }
 }
 
@@ -264,46 +247,56 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 async function searchAndAdd(query, user) {
   try {
     console.log(`[Bot Voice] Buscando: ${query}`);
-    const yt = require('youtube-dl-exec');
+    const play = require('play-dl');
+    const YTMusic = require('ytmusic-api');
     
-    let targetUrl;
-    if (query.startsWith('http')) {
-      targetUrl = query;
-    } else {
-      // Usar ytmusic-api para buscar el videoId, luego construir URL
-      const YTMusic = require('ytmusic-api');
-      const ytm = new YTMusic();
-      await ytm.initialize();
-      const search = await ytm.search(query);
-      if (!search || !search.length) return { error: 'No se encontraron resultados.' };
-      targetUrl = `https://www.youtube.com/watch?v=${search[0].videoId}`;
+    let searchQuery = query;
+    let fallbackThumbnail = null;
+
+    // Si es un link de YouTube/YouTube Music, extraer el ID y obtener el título real
+    if (query.includes('youtube.com') || query.includes('youtu.be')) {
+      let videoId = null;
+      if (query.includes('v=')) videoId = new URL(query).searchParams.get('v');
+      else if (query.includes('youtu.be/')) videoId = query.split('youtu.be/')[1].split('?')[0];
+      
+      if (videoId) {
+        const ytm = new YTMusic();
+        await ytm.initialize();
+        try {
+          const songInfo = await ytm.getSong(videoId);
+          if (songInfo && songInfo.name) {
+            searchQuery = `${songInfo.name} ${songInfo.artists?.[0]?.name || ''}`;
+            if (songInfo.thumbnails?.length > 0) {
+              fallbackThumbnail = songInfo.thumbnails[songInfo.thumbnails.length - 1].url;
+            }
+          }
+        } catch (e) {
+          console.log('[Bot Voice] No se pudo resolver metadata de YT, usando URL como fallback.');
+        }
+      }
     }
 
-    // Siempre normalizar a youtube.com (el extractor de music.youtube.com falla con --dump-json)
-    if (targetUrl.includes('music.youtube.com')) {
-      const videoId = new URL(targetUrl).searchParams.get('v');
-      if (videoId) targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    }
-    console.log(`[Bot Voice] URL normalizada: ${targetUrl}`);
-
-    // Obtener metadata con yt-dlp --dump-json (sin --format para evitar errores)
-    const ytArgs = {
-      dumpJson: true,
-      noWarnings: true,
-      noPlaylist: true,
-      extractorArgs: 'youtube:player_client=android'
-    };
-    const tmpCookiePath = require('path').join(require('os').tmpdir(), 'yt_cookies.txt');
-    if (require('fs').existsSync(tmpCookiePath)) ytArgs.cookies = tmpCookiePath;
-    else if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
+    console.log(`[Bot Voice] Consultando SoundCloud: ${searchQuery}`);
     
-    const info = await yt(targetUrl, ytArgs);
+    if (!play.getFreeClientID().is_cached) {
+      const clientId = await play.getFreeClientID();
+      play.setToken({ soundcloud: { client_id: clientId } });
+    }
+    
+    // Buscar en SoundCloud
+    const scResults = await play.search(searchQuery, { source: { soundcloud: 'tracks' }, limit: 1 });
+    if (!scResults || scResults.length === 0) {
+      return { error: 'No se encontró la canción en los servidores de audio (SoundCloud bridge).' };
+    }
+    
+    const track = scResults[0];
     
     const song = {
-      title: info.title,
-      url: info.webpage_url,
-      thumbnail: info.thumbnail,
-      duration: info.duration,
+      title: track.name,
+      url: track.url,
+      scUrl: track.url,
+      thumbnail: fallbackThumbnail || track.thumbnail,
+      duration: track.durationInSec,
       user
     };
     

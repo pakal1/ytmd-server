@@ -166,7 +166,7 @@ async function playNext() {
       output: '-',
       quiet: true,
       noWarnings: true,
-      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
+      format: 'bestaudio/best'
     };
     if (cookiesFilePath) {
       args.cookies = cookiesFilePath;
@@ -263,7 +263,7 @@ async function searchAndAdd(query, user) {
       dumpJson: true,
       noWarnings: true,
       noPlaylist: true,
-      format: 'bestaudio[ext=webm][acodec=opus]/bestaudio/best'
+      format: 'bestaudio/best'
     };
     if (cookiesFilePath) ytArgs.cookies = cookiesFilePath;
     

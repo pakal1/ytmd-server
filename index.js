@@ -268,42 +268,31 @@ async function ensureVoiceConnection(memberVoiceChannel) {
 
 async function searchAndAdd(query, user) {
   try {
-    console.log(`[Bot Voice] Buscando: ${query}`);
-    const YouTube = require('youtube-sr').default;
+    console.log(`[Bot Voice] Delegando búsqueda al cliente local: ${query}`);
+    const sockets = await io.fetchSockets();
+    if (sockets.length === 0) {
+      return { error: 'No hay ninguna app de YMusic conectada para buscar. Abrí la app en tu PC.' };
+    }
     
-    let targetUrl;
-    let title = query;
-    let thumbnail = null;
-    let duration = 0;
-
-    if (query.includes('youtube.com') || query.includes('youtu.be')) {
-      let videoId = null;
-      if (query.includes('v=')) videoId = new URL(query).searchParams.get('v');
-      else if (query.includes('youtu.be/')) videoId = query.split('youtu.be/')[1].split('?')[0];
-      
-      targetUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : query;
-      
-      try {
-        const info = await YouTube.getVideo(targetUrl);
-        if (info) {
-          title = info.title;
-          duration = info.duration / 1000;
-          thumbnail = info.thumbnail?.url || null;
-        }
-      } catch (e) {
-        console.log('[Bot Voice] No se pudo resolver metadata del video.');
-      }
-    } else {
-      const results = await YouTube.search(query, { limit: 1, type: 'video' });
-      if (!results || results.length === 0) return { error: 'No se encontraron resultados.' };
-      const top = results[0];
-      targetUrl = `https://www.youtube.com/watch?v=${top.id}`;
-      title = top.title || query;
-      duration = top.duration / 1000 || 0;
-      thumbnail = top.thumbnail?.url || null;
+    // Usamos el primer cliente conectado
+    const clientSocket = sockets[0];
+    
+    let result;
+    try {
+      result = await clientSocket.timeout(15000).emitWithAck('bot-search-request', query);
+    } catch (e) {
+      return { error: 'Timeout: La app local tardó demasiado en buscar la canción.' };
     }
 
-    const song = { title, url: targetUrl, thumbnail, duration, user };
+    if (result.error) return { error: result.error };
+    
+    const song = {
+      title: result.title,
+      url: result.url,
+      thumbnail: result.thumbnail,
+      duration: result.duration,
+      user
+    };
     
     queue.push(song);
     if (!isPlaying) {
@@ -314,8 +303,8 @@ async function searchAndAdd(query, user) {
     
     return { song };
   } catch (err) {
-    console.error('[Bot Voice] Error en searchAndAdd:', err);
-    return { error: 'Error interno buscando la canción.' };
+    console.error('[Bot Voice] Error en searchAndAdd delegada:', err);
+    return { error: 'Error interno conectando con la app local para buscar.' };
   }
 }
 

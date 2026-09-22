@@ -274,17 +274,22 @@ async function searchAndAdd(query, user) {
       return { error: 'No hay ninguna app de YMusic conectada para buscar. Abrí la app en tu PC.' };
     }
     
-    // Usamos el primer cliente conectado
-    const clientSocket = sockets[0];
-    
+    // Preguntar a TODOS los sockets conectados simultáneamente (por si hay conexiones zombies o múltiples pestañas)
+    const promises = sockets.map(clientSocket => 
+      clientSocket.timeout(15000).emitWithAck('bot-search-request', query).then(res => {
+        if (res && res.error) throw new Error(res.error);
+        if (!res || !res.title) throw new Error("Respuesta inválida");
+        return res;
+      })
+    );
+
     let result;
     try {
-      result = await clientSocket.timeout(15000).emitWithAck('bot-search-request', query);
+      // El primero que responda correctamente gana
+      result = await Promise.any(promises);
     } catch (e) {
-      return { error: 'Timeout: La app local tardó demasiado en buscar la canción.' };
+      return { error: 'Timeout: Ninguna app local conectada logró encontrar la canción a tiempo.' };
     }
-
-    if (result.error) return { error: result.error };
     
     const song = {
       title: result.title,

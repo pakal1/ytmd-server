@@ -205,9 +205,9 @@ async function playNext() {
     });
     
     const { StreamType } = require('@discordjs/voice');
-    const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.Arbitrary });
+    const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.WebmOpus });
     audioPlayer.play(resource);
-    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title}`);
+    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title} (WebmOpus)`);
   } catch (err) {
     console.error('[Bot Voice] Error al reproducir:', err.message);
     playNext();

@@ -129,6 +129,7 @@ let isPlaying = false;
 let voiceConnection = null;
 let cookiesFilePath = null;
 let currentAudioPassthrough = null; // PassThrough stream fed by Electron client chunks
+let streamingSocket = null;          // El socket específico que maneja el streaming activo
 
 function saveCookiesToFile(cookiesArray) {
   const lines = ['# Netscape HTTP Cookie File'];
@@ -178,43 +179,31 @@ async function playNext() {
     if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
       currentAudioPassthrough.destroy();
     }
-    currentAudioPassthrough = new PassThrough();
-    
-    console.log(`[Bot Voice] Solicitando stream local para: ${currentSong.url}`);
-    
-    // Esperar el primer chunk ANTES de pasar el stream a Discord
-    // (si no, ffmpeg empieza con buffer vacío y da TimeoutNegativeWarning)
-    await new Promise((resolve) => {
-      const onFirstData = () => {
-        console.log('[Bot Voice] Primer chunk recibido — iniciando player');
-        resolve();
-      };
-      currentAudioPassthrough.once('data', onFirstData);
-      
-      // Timeout de seguridad: si en 8s no llega nada, intentar igual
-      const fallback = setTimeout(() => {
-        currentAudioPassthrough.removeListener('data', onFirstData);
-        console.warn('[Bot Voice] Timeout esperando primer chunk — iniciando sin datos');
-        resolve();
-      }, 8000);
-      
-      // Limpiar timeout si llega el primer dato
-      currentAudioPassthrough.once('data', () => clearTimeout(fallback));
-      
-      io.emit('bot-stream-request', { url: currentSong.url });
-    });
+    // highWaterMark grande para que quepa una canción entera sin tirar backpressure
+    currentAudioPassthrough = new PassThrough({ highWaterMark: 5 * 1024 * 1024 });
     
     const { StreamType } = require('@discordjs/voice');
-    // IMPORTANTE: Usar Arbitrary (FFmpeg) en lugar de WebmOpus.
-    // El demuxer WebmOpus de discord.js no soporta datos llegando en "push"
-    // desde socket (se traba después del primer frame). FFmpeg actúa como
-    // buffer inteligente y decodifica correctamente sin importar el timing.
+    // CRÍTICO: Crear AudioResource ANTES de pedir el stream.
+    // FFmpeg (Arbitrary) espera datos en stdin de forma natural — no hay race condition.
+    // No usamos WebmOpus porque ese demuxer falla cuando los datos llegan en push masivo.
     const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.Arbitrary });
     audioPlayer.play(resource);
-    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title} (FFmpeg/Arbitrary)`);
+    console.log(`[Bot Voice] ▶ Reproduciendo: ${currentSong.title}`);
+    
+    // Pedir stream SÓLO al socket que respondió la búsqueda (evita múltiples yt-dlp)
+    console.log(`[Bot Voice] Solicitando stream a socket: ${streamingSocket?.id || 'any'}`);
+    if (streamingSocket && streamingSocket.connected) {
+      streamingSocket.emit('bot-stream-request', { url: currentSong.url });
+    } else {
+      // Fallback: primer socket disponible
+      const sockets = await io.fetchSockets();
+      if (sockets.length === 0) throw new Error('No hay sockets conectados');
+      streamingSocket = sockets[sockets.length - 1];
+      streamingSocket.emit('bot-stream-request', { url: currentSong.url });
+    }
   } catch (err) {
     console.error('[Bot Voice] Error al reproducir:', err.message);
-    playNext();
+    setTimeout(() => playNext(), 1000);
   }
 }
 
@@ -278,22 +267,27 @@ async function searchAndAdd(query, user) {
       return { error: 'No hay ninguna app de YMusic conectada para buscar. Abrí la app en tu PC.' };
     }
     
-    // Preguntar a TODOS los sockets conectados simultáneamente (por si hay conexiones zombies o múltiples pestañas)
+    // Preguntar a TODOS los sockets a la vez — el primero que responda gana
+    // y lo guardamos como streamingSocket para el paso de audio.
+    let winnerSocket = null;
     const promises = sockets.map(clientSocket => 
       clientSocket.timeout(15000).emitWithAck('bot-search-request', query).then(res => {
         if (res && res.error) throw new Error(res.error);
-        if (!res || !res.title) throw new Error("Respuesta inválida");
+        if (!res || !res.title) throw new Error('Respuesta inválida');
+        winnerSocket = clientSocket;
         return res;
       })
     );
 
     let result;
     try {
-      // El primero que responda correctamente gana
       result = await Promise.any(promises);
     } catch (e) {
       return { error: 'Timeout: Ninguna app local conectada logró encontrar la canción a tiempo.' };
     }
+    
+    // Guardar el socket ganador para usarlo en el streaming
+    if (winnerSocket) streamingSocket = winnerSocket;
     
     const song = {
       title: result.title,
@@ -445,14 +439,12 @@ io.on('connection', (socket) => {
   socket.on('bot-audio-chunk', (chunk) => {
     _chunkCount++;
     if (_chunkCount === 1) console.log('[Bot Voice] ✅ Primer chunk de audio recibido desde cliente');
-    if (_chunkCount % 50 === 0) console.log(`[Bot Voice] Chunks recibidos: ${_chunkCount}`);
+    if (_chunkCount % 100 === 0) console.log(`[Bot Voice] Chunks recibidos: ${_chunkCount}`);
     if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
+      // Escribir todos los chunks — el highWaterMark de 5MB en el PassThrough
+      // actúa como buffer. FFmpeg consume a su ritmo sin perder datos.
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      // Backpressure: si el PassThrough tiene demasiado buffereado, lo descartamos
-      // para evitar saturar FFmpeg (que procesa a ritmo de Discord, ~50 frames/s)
-      if (currentAudioPassthrough.writableLength < 256 * 1024) {
-        currentAudioPassthrough.write(buf);
-      }
+      currentAudioPassthrough.write(buf);
     }
   });
 

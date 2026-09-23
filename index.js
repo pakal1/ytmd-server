@@ -205,9 +205,13 @@ async function playNext() {
     });
     
     const { StreamType } = require('@discordjs/voice');
-    const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.WebmOpus });
+    // IMPORTANTE: Usar Arbitrary (FFmpeg) en lugar de WebmOpus.
+    // El demuxer WebmOpus de discord.js no soporta datos llegando en "push"
+    // desde socket (se traba después del primer frame). FFmpeg actúa como
+    // buffer inteligente y decodifica correctamente sin importar el timing.
+    const resource = createAudioResource(currentAudioPassthrough, { inputType: StreamType.Arbitrary });
     audioPlayer.play(resource);
-    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title} (WebmOpus)`);
+    console.log(`[Bot Voice] Reproduciendo: ${currentSong.title} (FFmpeg/Arbitrary)`);
   } catch (err) {
     console.error('[Bot Voice] Error al reproducir:', err.message);
     playNext();
@@ -443,7 +447,12 @@ io.on('connection', (socket) => {
     if (_chunkCount === 1) console.log('[Bot Voice] ✅ Primer chunk de audio recibido desde cliente');
     if (_chunkCount % 50 === 0) console.log(`[Bot Voice] Chunks recibidos: ${_chunkCount}`);
     if (currentAudioPassthrough && !currentAudioPassthrough.destroyed) {
-      currentAudioPassthrough.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      // Backpressure: si el PassThrough tiene demasiado buffereado, lo descartamos
+      // para evitar saturar FFmpeg (que procesa a ritmo de Discord, ~50 frames/s)
+      if (currentAudioPassthrough.writableLength < 256 * 1024) {
+        currentAudioPassthrough.write(buf);
+      }
     }
   });
 
